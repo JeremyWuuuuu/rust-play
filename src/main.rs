@@ -1,12 +1,13 @@
 extern crate tokio;
 extern crate httparse;
+#[macro_use]
 extern crate futures;
 extern crate bytes;
 extern crate http;
 
 use tokio::prelude::*;
 use tokio::io::copy;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, Incoming};
 use tokio::codec::{Decoder, Encoder};
 use futures::future;
 use std::{io, env, fmt};
@@ -14,43 +15,55 @@ use bytes::BytesMut;
 use http::{Request, Response, StatusCode};
 use http::header::HeaderValue;
 use httparse::Status;
-
+use std::convert::From;
 
 fn main() {
     // Bind the server's socket.
     let addr = "127.0.0.1:12345".parse().unwrap();
     let listener = TcpListener::bind(&addr)
         .expect("unable to bind TCP listener");
-
+    let server = HttpServer {
+        listener,
+    }.map_err(|e| {eprintln!("err = {:?}", e)}).and_then(|_| {
+        println!("running");
+        future::ok(())
+    });
     // Pull out a stream of sockets for incoming connections
-    let server = listener.incoming()
-        .map_err(|e| eprintln!("accept failed = {:?}", e))
-        .for_each(|sock| {
-            // Split up the reading and writing parts of the
-            // socket.
-            println!("task");
-            process(sock);
-            Ok(())
-        });
+    // let server = listener.incoming()
+    //     .map_err(|e| eprintln!("accept failed = {:?}", e))
+    //     .for_each(|sock| {
+    //         // Split up the reading and writing parts of the
+    //         // socket.
+    //         println!("task");
+    //         process(sock);
+    //         Ok(())
+    //     });
 
     // Start the Tokio runtime
     tokio::run(server);
 }
 
-fn process(socket: TcpStream) {
+fn process(socket: TcpStream) -> future::FutureResult<(), ()> {
     let (tx, rx) = Http.framed(socket).split();
 
-    let task = tx.send_all(rx.and_then(respond)).then(|res| {
-        if let Err(e) = res {
-            println!("failed to process connection; error = {:?}", e);
-        }
-        Ok(())
-    });
+    println!("{:?}, {:?}", &tx, &rx);
+    // let task = tx.send(rx.).then(|res| {
+    //     if let Err(e) = res {
+    //         println!("failed to process connection; error = {:?}", e);
+    //     }
+    //     Ok(())
+    // });
 
-    tokio::spawn(task);
+    // tokio::spawn(task);
+    // future::
+    // return tx.send_all(rx.and_then(respond)).then(|res| {
+    //     Ok(())
+    // })
+
+    future::ok(())
 }
 
-
+#[derive(Debug)]
 struct Http;
 
 
@@ -106,6 +119,7 @@ impl Decoder for Http {
 
     fn decode(&mut self, src: &mut BytesMut) -> io::Result<Option<Request<()>>> {
         let mut headers = [None; 16];
+        println!("{:p}", src);
         let (method, path, version, amt) = {
             let mut parsed_headers = [httparse::EMPTY_HEADER; 16];
             let mut r = httparse::Request::new(&mut parsed_headers);
@@ -189,4 +203,30 @@ fn respond(req: Request<()>) -> impl Future<Item = Response<String>, Error = io:
     });
 
     Box::new(f)
+}
+
+
+struct HttpServer {
+    listener: TcpListener,
+}
+
+impl Future for HttpServer {
+    type Item = ();
+    type Error = std::io::Error;
+    
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        loop {
+            match self.listener.poll_accept() {
+                Ok(Async::Ready(t)) => {
+                    tokio::spawn(process(t.0));
+                },
+                Ok(Async::NotReady) => {
+                    return Ok(Async::NotReady);
+                },
+                Err(e) => {
+                    return Err(From::from(e));
+                }
+            }
+        }
+    }
 }
